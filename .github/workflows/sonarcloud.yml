@@ -18,6 +18,24 @@ jobs:
       contents: read
       pull-requests: read
 
+    env:
+      mongo_connection_url: "mongodb://localhost:27017"
+      catalogo_database_name: "catalogo_test"
+      protocolo_database_name: "protocolo_test"
+      initiative_collection: "initiatives"
+      files_processing_collection: "files_processing"
+      call_processing_collection: "call_processing"
+      service_bus_namespace: "sb-test"
+      service_bus_storage_events_queue_name: "storage-events"
+      service_bus_transcription_jobs_queue_name: "transcription-jobs"
+      service_bus_evaluation_jobs_queue_name: "evaluation-jobs"
+      service_bus_document_generation_jobs_queue_name: "document-generation-jobs"
+      service_bus_storage_events_connection_string: "Endpoint=sb://test/;SharedAccessKeyName=test;SharedAccessKey=test"
+      service_bus_transcription_jobs_connection_string: "Endpoint=sb://test/;SharedAccessKeyName=test;SharedAccessKey=test"
+      service_bus_evaluation_jobs_connection_string: "Endpoint=sb://test/;SharedAccessKeyName=test;SharedAccessKey=test"
+      service_bus_document_generation_jobs_connection_string: "Endpoint=sb://test/;SharedAccessKeyName=test;SharedAccessKey=test"
+      ai_gateway_endpoint: "https://example.com"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,12 +58,11 @@ jobs:
       - name: Create test reports directory
         run: mkdir -p xunit-reports
 
-      - name: Run tests and generate coverage report
+      - name: Run unit tests and generate reports
         run: |
           poetry run coverage erase
-          poetry run coverage run -m pytest
+          poetry run coverage run -m pytest -m "not integration" --junitxml=xunit-reports/xunit-result.xml
           poetry run coverage xml -o coverage.xml
-          poetry run pytest --junitxml=xunit-reports/xunit-result.xml
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarcloud-github-action@master
