@@ -237,7 +237,11 @@ async def test_update_one_calls_collection_update_one_with_query_and_update():
 
     await repo.update_one({"_id": "1"}, {"$set": {"field": "new"}})
 
-    collection.update_one.assert_awaited_once_with({"_id": "1"}, {"$set": {"field": "new"}})
+    collection.update_one.assert_awaited_once_with(
+        {"_id": "1"},
+        {"$set": {"field": "new"}},
+        upsert=False,
+    )
 
 
 @pytest.mark.unit

@@ -1,7 +1,8 @@
 import asyncio
-from datetime import datetime, timezone
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import (
     BulkWriteError,
@@ -11,6 +12,7 @@ from pymongo.errors import (
     PyMongoError,
 )
 from pymongo.results import DeleteResult, InsertManyResult
+
 from src.config.logger import logger
 from src.infrastructure.exceptions.mongodb_exceptions import (
     DatabaseConnectionError,
@@ -19,6 +21,8 @@ from src.infrastructure.exceptions.mongodb_exceptions import (
 )
 
 IndexType = Tuple[List[Tuple[str, int]], Dict[str, Any]]
+BulkWriteParseResult = Tuple[int, Optional[int], List[Dict[str, Any]]]
+
 
 class MongoGenericRepo:
     _MAX_RETRIES = 3
@@ -28,11 +32,34 @@ class MongoGenericRepo:
     def __init__(self, collection: AsyncCollection):
         self._collection = collection
 
+    @property
+    def _collection_name(self) -> str:
+        return self._collection.name
+
+    def _log_error(self, message: str, **context: Any) -> None:
+        logger.error(message, context={"collection": self._collection_name, **context})
+
+    def _log_warning(self, message: str, **context: Any) -> None:
+        logger.warning(message, context={"collection": self._collection_name, **context})
+
+    def _log_info(self, message: str, **context: Any) -> None:
+        logger.info(message, context={"collection": self._collection_name, **context})
+
+    @staticmethod
+    def _set_timestamps(document: Dict[str, Any]) -> None:
+        now = datetime.now(timezone.utc)
+        document["created_at"] = now
+        document["updated_at"] = now
+
+    def _set_timestamps_many(self, documents: List[Dict[str, Any]]) -> None:
+        for document in documents:
+            self._set_timestamps(document)
+
     @staticmethod
     def _classify_and_raise(exc: Exception, *, operation: str, collection: str = "") -> None:
         if isinstance(exc, (ConnectionFailure, NetworkTimeout)):
             raise DatabaseConnectionError(
-                f"Conexión perdida durante operación '{operation}': {exc}",
+                f"Conexion perdida durante operacion '{operation}': {exc}",
                 original_exception=exc,
             ) from exc
         if isinstance(exc, DuplicateKeyError):
@@ -47,179 +74,279 @@ class MongoGenericRepo:
             original_exception=exc,
         ) from exc
 
+    async def _create_index_in_collection(self, keys: List[Tuple[str, int]], options: Dict[str, Any]) -> None:
+        await self._collection.create_index(keys, **options)
+
+    async def _insert_one_in_collection(self, document: Dict[str, Any]) -> None:
+        await self._collection.insert_one(document)
+
+    async def _insert_many_in_collection(self, documents: List[Dict[str, Any]]) -> InsertManyResult:
+        return await self._collection.insert_many(documents)
+
+    async def _find_one_in_collection(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        return await self._collection.find_one(query)
+
+    async def _find_many_in_collection(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return await self._collection.find(query).to_list(length=None)
+
+    async def _update_one_in_collection(self, query: Dict[str, Any], update: Dict[str, Any], *, upsert: bool = False):
+        return await self._collection.update_one(query, update, upsert=upsert)
+
+    async def _delete_one_in_collection(self, query: Dict[str, Any]) -> DeleteResult:
+        return await self._collection.delete_one(query)
+
+    def _raise_connection_error(self, exc: Exception, operation: str) -> None:
+        self._classify_and_raise(exc, operation=operation)
+
+    def _raise_operation_error(self, exc: Exception, operation: str) -> None:
+        self._classify_and_raise(exc, operation=operation, collection=self._collection_name)
+
+    @staticmethod
+    def _parse_bulk_write_error(exc: BulkWriteError) -> BulkWriteParseResult:
+        details = exc.details or {}
+        inserted_count = details.get("nInserted", 0)
+        write_errors = details.get("writeErrors", [])
+        first_error_index = write_errors[0].get("index") if write_errors else None
+        if first_error_index is None:
+            return inserted_count, None, write_errors
+        return first_error_index, first_error_index, write_errors
+
+    def _compute_bulk_retry_wait_seconds(self, retry_count: int, write_errors: List[Dict[str, Any]]) -> float:
+        retry_after_ms = self._find_retry_after_ms(write_errors)
+        if retry_after_ms:
+            return (retry_after_ms / 1000) + (self._BASE_RETRY_DELAY * retry_count)
+        return self._BASE_RETRY_DELAY * (2 ** retry_count)
+
+    def _find_retry_after_ms(self, write_errors: List[Dict[str, Any]]) -> Optional[int]:
+        for write_error in write_errors:
+            retry_after_ms = self._extract_retry_after_ms(write_error.get("errmsg", ""))
+            if retry_after_ms is not None:
+                return retry_after_ms
+        return None
+
+    async def _wait_bulk_retry(self, retry_count: int, write_errors: List[Dict[str, Any]]) -> None:
+        wait_seconds = self._compute_bulk_retry_wait_seconds(retry_count, write_errors)
+        self._log_warning(
+            "Rate limit excedido en insert_many, reintentando",
+            retry=retry_count,
+            wait_seconds=round(wait_seconds, 2),
+        )
+        await asyncio.sleep(wait_seconds)
+
+    async def _wait_pymongo_retry(self, retry_count: int) -> None:
+        wait_seconds = self._BASE_RETRY_DELAY * (2 ** retry_count)
+        self._log_warning(
+            "Rate limit en insert_many (PyMongoError), reintentando",
+            retry=retry_count,
+            max_retries=self._MAX_RETRIES,
+            wait_seconds=round(wait_seconds, 2),
+        )
+        await asyncio.sleep(wait_seconds)
+
+    def _should_return_after_bulk_error(self, actual_inserted: int, remaining_docs: List[Dict[str, Any]]) -> bool:
+        if actual_inserted == 0:
+            return False
+        return actual_inserted >= len(remaining_docs)
+
+    @staticmethod
+    def _slice_remaining_docs(remaining_docs: List[Dict[str, Any]], actual_inserted: int) -> List[Dict[str, Any]]:
+        return remaining_docs[actual_inserted:]
+
+    def _raise_bulk_rate_limit_exhausted(
+        self,
+        *,
+        total_inserted: int,
+        remaining_docs: List[Dict[str, Any]],
+        actual_inserted: int,
+        first_error_index: Optional[int],
+        exc: BulkWriteError,
+    ) -> None:
+        self._log_error(
+            "insert_many fallo tras max reintentos por rate limit",
+            max_retries=self._MAX_RETRIES,
+            total_inserted=total_inserted,
+            failed_count=len(remaining_docs) - actual_inserted,
+            first_error_index=first_error_index,
+        )
+        if total_inserted > 0:
+            return
+        raise DatabaseOperationError(
+            operation="insert_many",
+            error_detail=f"Rate limit excedido tras {self._MAX_RETRIES} reintentos",
+            original_exception=exc,
+        ) from exc
+
+    def _is_retry_limit_reached(self, retry_count: int) -> bool:
+        return retry_count >= self._MAX_RETRIES
+
     async def create_index(self):
-        for keys, kwargs in self._indexes:
+        for keys, options in self._indexes:
             try:
-                await self._collection.create_index(keys, **kwargs)
-            except PyMongoError as e:
-                logger.error("Error creando indice en MongoDB", context={"collection": self._collection.name, "error": str(e)})
-                self._classify_and_raise(e, operation="create_index", collection=self._collection.name)
+                await self._create_index_in_collection(keys, options)
+            except PyMongoError as exc:
+                self._log_error("Error creando indice en MongoDB", error=str(exc))
+                self._raise_operation_error(exc, operation="create_index")
 
     async def insert_one(self, document: Dict[str, Any]):
-        document["created_at"] = datetime.now(timezone.utc)
-        document["updated_at"] = datetime.now(timezone.utc)
+        self._set_timestamps(document)
         try:
-            await self._collection.insert_one(document)
-        except DuplicateKeyError as e:
-            logger.error("Clave duplicada al insertar documento", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="insert_one", collection=self._collection.name)
-        except (ConnectionFailure, NetworkTimeout) as e:
-            logger.error("Error de conexion al insertar documento", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="insert_one")
-        except PyMongoError as e:
-            logger.error("Error al insertar documento", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="insert_one", collection=self._collection.name)
+            await self._insert_one_in_collection(document)
+        except DuplicateKeyError as exc:
+            self._log_error("Clave duplicada al insertar documento", error=str(exc))
+            self._raise_operation_error(exc, operation="insert_one")
+        except (ConnectionFailure, NetworkTimeout) as exc:
+            self._log_error("Error de conexion al insertar documento", error=str(exc))
+            self._raise_connection_error(exc, operation="insert_one")
+        except PyMongoError as exc:
+            self._log_error("Error al insertar documento", error=str(exc))
+            self._raise_operation_error(exc, operation="insert_one")
 
     async def insert_many(self, documents: List[Dict[str, Any]]):
-        for document in documents:
-            document["created_at"] = datetime.now(timezone.utc)
-            document["updated_at"] = datetime.now(timezone.utc)
+        self._set_timestamps_many(documents)
 
         retry_count = 0
         remaining_docs = documents
         total_inserted = 0
 
-        while retry_count < self._MAX_RETRIES:
+        while not self._is_retry_limit_reached(retry_count):
             try:
-                res: InsertManyResult = await self._collection.insert_many(remaining_docs)
-                inserted_count = len(res.inserted_ids)
+                result = await self._insert_many_in_collection(remaining_docs)
+                inserted_count = len(result.inserted_ids)
                 total_inserted += inserted_count
                 if retry_count > 0:
-                    logger.info("Documentos insertados tras reintentos", context={"collection": self._collection.name, "inserted": inserted_count, "retries": retry_count})
+                    self._log_info(
+                        "Documentos insertados tras reintentos",
+                        inserted=inserted_count,
+                        retries=retry_count,
+                    )
                 return total_inserted
-            except BulkWriteError as e:
-                inserted_count = e.details.get("nInserted", 0) if e.details else 0
-                write_errors = e.details.get("writeErrors", []) if e.details else []
-                first_error_index = None
-                if write_errors:
-                    first_error_index = write_errors[0].get("index", None)
-                if first_error_index is not None:
-                    if inserted_count != first_error_index:
-                        logger.warning("Insercion parcial antes de error en bulk write", context={"collection": self._collection.name, "inserted": inserted_count, "error_index": first_error_index})
-                    actual_inserted = first_error_index
-                else:
-                    actual_inserted = inserted_count
+            except BulkWriteError as exc:
+                actual_inserted, first_error_index, write_errors = self._parse_bulk_write_error(exc)
+                inserted_count = exc.details.get("nInserted", 0) if exc.details else 0
+                if first_error_index is not None and inserted_count != first_error_index:
+                    self._log_warning(
+                        "Insercion parcial antes de error en bulk write",
+                        inserted=inserted_count,
+                        error_index=first_error_index,
+                    )
+
                 total_inserted += actual_inserted
 
-                if self._is_rate_limit_error(e):
-                    retry_count += 1
-                    if retry_count >= self._MAX_RETRIES:
-                        logger.error("insert_many fallo tras max reintentos por rate limit", context={"collection": self._collection.name, "max_retries": self._MAX_RETRIES, "total_inserted": total_inserted, "failed_count": len(remaining_docs) - actual_inserted, "first_error_index": first_error_index})
-                        if total_inserted > 0:
-                            return total_inserted
-                        raise DatabaseOperationError(
-                            operation="insert_many",
-                            error_detail=f"Rate limit excedido tras {self._MAX_RETRIES} reintentos",
-                            original_exception=e,
-                        ) from e
+                if not self._is_rate_limit_error(exc):
+                    self._log_error("BulkWriteError no recuperable en insert_many", error=str(exc))
+                    self._raise_operation_error(exc, operation="insert_many")
 
-                    retry_after_ms = None
-                    for write_error in write_errors:
-                        retry_after_ms = self._extract_retry_after_ms(write_error.get("errmsg", ""))
-                        if retry_after_ms is not None:
-                            break
-                    wait_time = (
-                        (retry_after_ms / 1000) + (self._BASE_RETRY_DELAY * retry_count)
-                        if retry_after_ms
-                        else self._BASE_RETRY_DELAY * (2 ** retry_count)
+                retry_count += 1
+                if self._is_retry_limit_reached(retry_count):
+                    self._raise_bulk_rate_limit_exhausted(
+                        total_inserted=total_inserted,
+                        remaining_docs=remaining_docs,
+                        actual_inserted=actual_inserted,
+                        first_error_index=first_error_index,
+                        exc=exc,
                     )
-                    logger.warning("Rate limit excedido en insert_many, reintentando", context={"collection": self._collection.name, "retry": retry_count, "wait_seconds": round(wait_time, 2)})
-                    await asyncio.sleep(wait_time)
-
-                    if actual_inserted > 0 and actual_inserted < len(remaining_docs):
-                        remaining_docs = remaining_docs[actual_inserted:]
-                    elif actual_inserted == 0:
-                        logger.error("Ningun documento insertado en el reintento", context={"collection": self._collection.name, "retry": retry_count})
-                    else:
+                    if total_inserted > 0:
                         return total_inserted
+
+                await self._wait_bulk_retry(retry_count, write_errors)
+
+                if actual_inserted == 0:
+                    self._log_error("Ningun documento insertado en el reintento", retry=retry_count)
                     continue
-                else:
-                    logger.error("BulkWriteError no recuperable en insert_many", context={"collection": self._collection.name, "error": str(e)})
-                    self._classify_and_raise(e, operation="insert_many", collection=self._collection.name)
-            except (ConnectionFailure, NetworkTimeout) as e:
-                logger.error("Error de conexion en insert_many", context={"collection": self._collection.name, "error": str(e)})
-                self._classify_and_raise(e, operation="insert_many")
-            except PyMongoError as e:
-                if self._is_rate_limit_error(e) and retry_count < self._MAX_RETRIES:
+
+                if self._should_return_after_bulk_error(actual_inserted, remaining_docs):
+                    return total_inserted
+
+                remaining_docs = self._slice_remaining_docs(remaining_docs, actual_inserted)
+                continue
+            except (ConnectionFailure, NetworkTimeout) as exc:
+                self._log_error("Error de conexion en insert_many", error=str(exc))
+                self._raise_connection_error(exc, operation="insert_many")
+            except PyMongoError as exc:
+                if self._is_rate_limit_error(exc) and not self._is_retry_limit_reached(retry_count):
                     retry_count += 1
-                    wait_time = self._BASE_RETRY_DELAY * (2 ** retry_count)
-                    logger.warning("Rate limit en insert_many (PyMongoError), reintentando", context={"collection": self._collection.name, "retry": retry_count, "max_retries": self._MAX_RETRIES, "wait_seconds": round(wait_time, 2)})
-                    await asyncio.sleep(wait_time)
+                    await self._wait_pymongo_retry(retry_count)
                     continue
-                logger.error("PyMongoError en insert_many", context={"collection": self._collection.name, "error": str(e)})
-                self._classify_and_raise(e, operation="insert_many", collection=self._collection.name)
+
+                self._log_error("PyMongoError en insert_many", error=str(exc))
+                self._raise_operation_error(exc, operation="insert_many")
 
         raise DatabaseOperationError(
             operation="insert_many",
-            error_detail=f"insert_many falló tras {self._MAX_RETRIES} reintentos",
+            error_detail=f"insert_many fallo tras {self._MAX_RETRIES} reintentos",
         )
 
     async def find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            return await self._collection.find_one(query)
-        except (ConnectionFailure, NetworkTimeout) as e:
-            logger.error("Error de conexion en find_one", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="find_one")
-        except PyMongoError as e:
-            logger.error("Error en find_one", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="find_one", collection=self._collection.name)
+            return await self._find_one_in_collection(query)
+        except (ConnectionFailure, NetworkTimeout) as exc:
+            self._log_error("Error de conexion en find_one", error=str(exc))
+            self._raise_connection_error(exc, operation="find_one")
+        except PyMongoError as exc:
+            self._log_error("Error en find_one", error=str(exc))
+            self._raise_operation_error(exc, operation="find_one")
 
     async def find_many(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         try:
-            return await self._collection.find(query).to_list(length=None)
-        except (ConnectionFailure, NetworkTimeout) as e:
-            logger.error("Error de conexion en find_many", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="find_many")
-        except PyMongoError as e:
-            logger.error("Error en find_many", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="find_many", collection=self._collection.name)
+            return await self._find_many_in_collection(query)
+        except (ConnectionFailure, NetworkTimeout) as exc:
+            self._log_error("Error de conexion en find_many", error=str(exc))
+            self._raise_connection_error(exc, operation="find_many")
+        except PyMongoError as exc:
+            self._log_error("Error en find_many", error=str(exc))
+            self._raise_operation_error(exc, operation="find_many")
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         try:
-            return await self._collection.update_one(query, update)
-        except (ConnectionFailure, NetworkTimeout) as e:
-            logger.error("Error de conexion en update_one", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="update_one")
-        except PyMongoError as e:
-            logger.error("Error en update_one", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="update_one", collection=self._collection.name)
+            return await self._update_one_in_collection(query, update)
+        except (ConnectionFailure, NetworkTimeout) as exc:
+            self._log_error("Error de conexion en update_one", error=str(exc))
+            self._raise_connection_error(exc, operation="update_one")
+        except PyMongoError as exc:
+            self._log_error("Error en update_one", error=str(exc))
+            self._raise_operation_error(exc, operation="update_one")
 
     async def update_one_upsert(self, query: Dict[str, Any], update: Dict[str, Any]):
         try:
-            return await self._collection.update_one(query, update, upsert=True)
-        except DuplicateKeyError as e:
-            logger.error("Clave duplicada en upsert", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="update_one_upsert", collection=self._collection.name)
-        except (ConnectionFailure, NetworkTimeout) as e:
-            logger.error("Error de conexion en update_one_upsert", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="update_one_upsert")
-        except PyMongoError as e:
-            logger.error("Error en update_one_upsert", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="update_one_upsert", collection=self._collection.name)
+            return await self._update_one_in_collection(query, update, upsert=True)
+        except DuplicateKeyError as exc:
+            self._log_error("Clave duplicada en upsert", error=str(exc))
+            self._raise_operation_error(exc, operation="update_one_upsert")
+        except (ConnectionFailure, NetworkTimeout) as exc:
+            self._log_error("Error de conexion en update_one_upsert", error=str(exc))
+            self._raise_connection_error(exc, operation="update_one_upsert")
+        except PyMongoError as exc:
+            self._log_error("Error en update_one_upsert", error=str(exc))
+            self._raise_operation_error(exc, operation="update_one_upsert")
 
     async def delete_one(self, query: Dict[str, Any]) -> Optional[int]:
         try:
-            res: DeleteResult = await self._collection.delete_one(query)
-            return res.deleted_count
-        except (ConnectionFailure, NetworkTimeout) as e:
-            logger.error("Error de conexion en delete_one", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="delete_one")
-        except PyMongoError as e:
-            logger.error("Error en delete_one", context={"collection": self._collection.name, "error": str(e)})
-            self._classify_and_raise(e, operation="delete_one", collection=self._collection.name)
+            result = await self._delete_one_in_collection(query)
+            return result.deleted_count
+        except (ConnectionFailure, NetworkTimeout) as exc:
+            self._log_error("Error de conexion en delete_one", error=str(exc))
+            self._raise_connection_error(exc, operation="delete_one")
+        except PyMongoError as exc:
+            self._log_error("Error en delete_one", error=str(exc))
+            self._raise_operation_error(exc, operation="delete_one")
 
     def _is_rate_limit_error(self, exc: PyMongoError) -> bool:
         if isinstance(exc, BulkWriteError):
-            if exc.details and "writeErrors" in exc.details:
-                for write_error in exc.details["writeErrors"]:
-                    error_code = write_error.get("code")
-                    error_message = write_error.get("errmsg", "")
-                    if error_code == 16500 or "429" in error_message or "TooManyRequests" in error_message:
-                        return True
-        elif isinstance(exc, PyMongoError):
-            error_message = str(exc)
-            if "429" in error_message or "TooManyRequests" in error_message or "Request rate os large" in error_message:
-                return True
+            details = exc.details or {}
+            for write_error in details.get("writeErrors", []):
+                code = write_error.get("code")
+                message = write_error.get("errmsg", "")
+                if code == 16500:
+                    return True
+                if "429" in message or "TooManyRequests" in message:
+                    return True
+            return False
+
+        message = str(exc)
+        if "429" in message or "TooManyRequests" in message:
+            return True
+        if "Request rate os large" in message:
+            return True
         return False
 
     def _extract_retry_after_ms(self, error_message: str) -> int | None:

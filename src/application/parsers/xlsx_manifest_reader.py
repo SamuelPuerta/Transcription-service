@@ -1,13 +1,16 @@
 from io import BytesIO
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
 from openpyxl import load_workbook
 
 NBSP = "\u00a0"
+
 
 def _norm_text(s: str) -> str:
     s = s.replace(NBSP, " ").replace("\t", " ").strip()
     s = " ".join(s.split())
     return s
+
 
 def _norm_header(h: Any) -> str:
     if h is None:
@@ -15,6 +18,7 @@ def _norm_header(h: Any) -> str:
     if isinstance(h, str):
         return _norm_text(h).casefold()
     return str(h).strip().casefold()
+
 
 def _clean(v: Any) -> Any:
     if v is None:
@@ -26,20 +30,22 @@ def _clean(v: Any) -> Any:
         return s
     return v
 
+
 def norm_wav_key(v: Any) -> Optional[str]:
     v = _clean(v)
     if v is None:
         return None
-    s = str(v)
-    s = s.replace("\\", "/")
-    s = _norm_text(s)
-    if "/" in s:
-        s = s.rsplit("/", 1)[-1].strip()
-    return s or None
 
-def _iter_table_rows(ws, table) -> Iterable[tuple]:
+    normalized = _norm_text(str(v).replace("\\", "/"))
+    if "/" in normalized:
+        normalized = normalized.rsplit("/", 1)[-1].strip()
+    return normalized or None
+
+
+def _iter_table_rows(ws, table) -> Iterable[Tuple[Any, ...]]:
     for row in ws[table.ref]:
         yield tuple(cell.value for cell in row)
+
 
 HEADER_ALIASES = {
     "wav_name": {"wav_name", "wav name", "wav", "wavname", "filename", "file_name"},
@@ -80,49 +86,80 @@ PUBLIC_FIELD_MAP = {
     "Denominación_causa E-Bitacora": "denominación_causa e-bitacora",
 }
 
+_CANONICAL_HEADER_BY_ALIAS = {
+    alias: canonical
+    for canonical, aliases in HEADER_ALIASES.items()
+    for alias in aliases
+}
+
 
 def _canonical_header(h_norm: str) -> str:
-    for canon, opts in HEADER_ALIASES.items():
-        if h_norm in opts:
-            return canon
-    return h_norm
+    return _CANONICAL_HEADER_BY_ALIAS.get(h_norm, h_norm)
 
 
-def _select_best_table_block(ws, tables) -> list[tuple] | None:
-    fallback = None
-    for table in tables:
-        block = list(_iter_table_rows(ws, table))
-        if not block:
-            continue
-        headers = [_norm_header(h) for h in block[0]]
-        if "wav_name" in headers:
-            return block
-        if fallback is None:
-            fallback = block
-    return fallback
-
-
-def _get_candidate_blocks(ws) -> list[list[tuple]]:
+def _read_table_blocks(ws) -> List[List[Tuple[Any, ...]]]:
     tables = list(ws.tables.values()) if getattr(ws, "tables", None) else []
-    if tables:
-        best = _select_best_table_block(ws, tables)
-        if best:
-            return [best]
+    if not tables:
+        return []
 
+    selected = _select_best_table_block(ws, tables)
+    return [selected] if selected else []
+
+
+def _read_full_sheet_block(ws) -> List[List[Tuple[Any, ...]]]:
     all_rows = list(ws.iter_rows(values_only=True))
     if not all_rows:
         return []
     return [all_rows]
 
 
-def _build_row(headers_canon: list[str], values: tuple) -> Dict[str, Any]:
-    row: Dict[str, Any] = {}
-    for idx, hcanon in enumerate(headers_canon):
-        if not hcanon:
+def _get_candidate_blocks(ws) -> List[List[Tuple[Any, ...]]]:
+    table_blocks = _read_table_blocks(ws)
+    if table_blocks:
+        return table_blocks
+    return _read_full_sheet_block(ws)
+
+
+def _select_best_table_block(ws, tables) -> Optional[List[Tuple[Any, ...]]]:
+    fallback = None
+    for table in tables:
+        block = list(_iter_table_rows(ws, table))
+        if not block:
             continue
-        value = _clean(values[idx] if idx < len(values) else None)
+
+        normalized_headers = [_norm_header(h) for h in block[0]]
+        if "wav_name" in normalized_headers:
+            return block
+
+        if fallback is None:
+            fallback = block
+    return fallback
+
+
+def _is_usable_block(rows: List[Tuple[Any, ...]]) -> bool:
+    return bool(rows)
+
+
+def _split_header_and_data(rows: List[Tuple[Any, ...]]) -> Tuple[Tuple[Any, ...], List[Tuple[Any, ...]]]:
+    return rows[0], rows[1:]
+
+
+def _build_headers_canonical(raw_headers: Tuple[Any, ...]) -> List[str]:
+    return [_canonical_header(_norm_header(header)) for header in raw_headers]
+
+
+def _is_empty_row(values: Tuple[Any, ...]) -> bool:
+    return not values
+
+
+def _build_row(headers_canon: List[str], values: Tuple[Any, ...]) -> Dict[str, Any]:
+    row: Dict[str, Any] = {}
+    for index, canonical_header in enumerate(headers_canon):
+        if not canonical_header:
+            continue
+        value = _clean(values[index] if index < len(values) else None)
         if value is not None:
-            row[hcanon] = value
+            row[canonical_header] = value
     return row
 
 
@@ -132,37 +169,50 @@ def _merge_manifest_row(manifest: Dict[str, Dict[str, Any]], row: Dict[str, Any]
         return
 
     current = manifest.get(key, {})
-    for k, v in row.items():
-        if v is not None:
-            current[k] = v
+    for field, value in row.items():
+        if value is not None:
+            current[field] = value
     manifest[key] = current
 
 
 def _to_public_manifest(manifest: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     final: Dict[str, Dict[str, Any]] = {}
     for key, values in manifest.items():
-        mapped = {public_key: values.get(source_key) for public_key, source_key in PUBLIC_FIELD_MAP.items()}
-        final[key] = {k: v for k, v in mapped.items() if v is not None}
+        mapped = {
+            public_key: values.get(source_key)
+            for public_key, source_key in PUBLIC_FIELD_MAP.items()
+        }
+        final[key] = {field: value for field, value in mapped.items() if value is not None}
     return final
 
 
-def parse_xlsx_manifest(xlsx: BytesIO) -> Dict[str, Dict[str, Any]]:
-    wb = load_workbook(xlsx, data_only=True)
-    ws = wb.active
+def _transform_block_into_manifest_rows(
+    rows: List[Tuple[Any, ...]],
+    manifest: Dict[str, Dict[str, Any]],
+) -> None:
+    if not _is_usable_block(rows):
+        return
 
-    candidate_blocks = _get_candidate_blocks(ws)
+    raw_headers, data_rows = _split_header_and_data(rows)
+    headers_canon = _build_headers_canonical(raw_headers)
+
+    for values in data_rows:
+        if _is_empty_row(values):
+            continue
+        row = _build_row(headers_canon, values)
+        _merge_manifest_row(manifest, row)
+
+
+def parse_xlsx_manifest(xlsx: BytesIO) -> Dict[str, Dict[str, Any]]:
+    workbook = load_workbook(xlsx, data_only=True)
+    worksheet = workbook.active
+
+    candidate_blocks = _get_candidate_blocks(worksheet)
     if not candidate_blocks:
         return {}
 
     manifest: Dict[str, Dict[str, Any]] = {}
     for rows in candidate_blocks:
-        if not rows:
-            continue
-        headers_canon = [_canonical_header(_norm_header(h)) for h in rows[0]]
-        for values in rows[1:]:
-            if not values:
-                continue
-            row = _build_row(headers_canon, values)
-            _merge_manifest_row(manifest, row)
+        _transform_block_into_manifest_rows(rows, manifest)
 
     return _to_public_manifest(manifest)
