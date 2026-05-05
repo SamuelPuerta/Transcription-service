@@ -280,7 +280,7 @@ async def test_start_creates_background_task_named_after_queue(monkeypatch):
 
     monkeypatch.setattr(consumer_mod.asyncio, "create_task", _create_task)
 
-    await adapter.start()
+    adapter.start()
 
     assert adapter._task is not None
     assert created["name"] == "consumer-q-storage"
@@ -294,7 +294,7 @@ async def test_start_does_nothing_when_task_already_running(monkeypatch):
     monkeypatch.setattr(consumer_mod.asyncio, "create_task", create_task)
     adapter._task = _FakeTask(done=False)
 
-    await adapter.start()
+    adapter.start()
 
     create_task.assert_not_called()
 

@@ -12,7 +12,7 @@ from src.config.settings import settings
 from src.config.logger import logger
 from src.infrastructure.exceptions.mongodb_exceptions import DatabaseConnectionError
 
-async def create_mongo_client() -> AsyncMongoClient:
+def create_mongo_client() -> AsyncMongoClient:
     try:
         client = AsyncMongoClient(
             settings.mongo_connection_url,

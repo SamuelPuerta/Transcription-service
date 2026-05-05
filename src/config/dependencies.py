@@ -107,7 +107,7 @@ def build_infra_lifespan():
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         client: Optional[AsyncIOMotorClient] = None
-        client = await create_mongo_client()
+        client = create_mongo_client()
         catalogo_db = get_database(client, settings.catalogo_database_name)
         protocolo_db = get_database(client, settings.protocolo_database_name)
         await asyncio.gather(
@@ -151,9 +151,9 @@ def build_infra_lifespan():
         storage_events_consumer = StorageEventsConsumerAdapter()
         transcription_jobs_consumer = TranscriptionJobsConsumerAdapter()
         evalaution_jobs_consumer = EvaluationJobsConsumerAdapter()
-        await storage_events_consumer.start()
-        await transcription_jobs_consumer.start()
-        await evalaution_jobs_consumer.start()
+        storage_events_consumer.start()
+        transcription_jobs_consumer.start()
+        evalaution_jobs_consumer.start()
 
         logger.info("Transcription Service starting up")
         try:

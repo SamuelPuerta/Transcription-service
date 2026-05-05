@@ -112,7 +112,7 @@ def test_status_for_domain_returns_400_for_unknown_code():
 async def test_handle_domain_exception_returns_json_response_with_correct_status():
     exc = InvalidStorageEvent("bad subject")
 
-    response = await handle_domain_exception(_request(), exc)
+    response = handle_domain_exception(_request(), exc)
 
     assert response.status_code == 400
 
@@ -122,7 +122,7 @@ async def test_handle_domain_exception_returns_json_response_with_correct_status
 async def test_handle_domain_exception_response_body_contains_type_and_detail():
     exc = InitiativeNotFound("INIT")
 
-    response = await handle_domain_exception(_request(), exc)
+    response = handle_domain_exception(_request(), exc)
 
     import json
     body = json.loads(response.body)
@@ -136,7 +136,7 @@ async def test_handle_domain_exception_response_body_contains_type_and_detail():
 async def test_handle_domain_exception_includes_extra_when_present():
     exc = DomainException("error", code="domain_error", extra={"field": "batch_id"})
 
-    response = await handle_domain_exception(_request(), exc)
+    response = handle_domain_exception(_request(), exc)
 
     import json
     body = json.loads(response.body)
@@ -149,7 +149,7 @@ async def test_handle_domain_exception_includes_extra_when_present():
 async def test_handle_domain_exception_omits_extra_when_empty():
     exc = DomainException("error", code="domain_error")
 
-    response = await handle_domain_exception(_request(), exc)
+    response = handle_domain_exception(_request(), exc)
 
     import json
     body = json.loads(response.body)
@@ -163,7 +163,7 @@ async def test_handle_domain_exception_omits_extra_when_empty():
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_handle_unhandled_exception_returns_500():
-    response = await handle_unhandled_exception(_request(), RuntimeError("crash"))
+    response = handle_unhandled_exception(_request(), RuntimeError("crash"))
 
     assert response.status_code == 500
 
@@ -173,7 +173,7 @@ async def test_handle_unhandled_exception_returns_500():
 async def test_handle_unhandled_exception_response_body_has_internal_error_type():
     import json
 
-    response = await handle_unhandled_exception(_request(), RuntimeError("crash"))
+    response = handle_unhandled_exception(_request(), RuntimeError("crash"))
 
     body = json.loads(response.body)
     assert body["type"] == "internal_error"
@@ -194,7 +194,7 @@ async def test_handle_validation_error_returns_422():
     try:
         _M(value="not-an-int")
     except ValidationError as exc:
-        response = await handle_validation_error(_request(), exc)
+        response = handle_validation_error(_request(), exc)
 
     assert response.status_code == 422
 
@@ -211,7 +211,7 @@ async def test_handle_validation_error_body_contains_validation_error_type():
     try:
         _M(value="not-an-int")
     except ValidationError as exc:
-        response = await handle_validation_error(_request(), exc)
+        response = handle_validation_error(_request(), exc)
 
     body = json.loads(response.body)
     assert body["type"] == "validation_error"

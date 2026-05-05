@@ -86,7 +86,7 @@ def _status_for_domain(exc: DomainException) -> int:
     return 400
 
 
-async def handle_domain_exception(request: Request, exc: DomainException):
+def handle_domain_exception(request: Request, exc: DomainException):
     status_code = _status_for_domain(exc)
     logger.info(
         "Excepcion de dominio",
@@ -106,7 +106,7 @@ async def handle_domain_exception(request: Request, exc: DomainException):
     )
 
 
-async def handle_validation_error(request: Request, exc: ValidationError):
+def handle_validation_error(request: Request, exc: ValidationError):
     errors = exc.errors()
     logger.warning(
         "Error de validacion de request",
@@ -126,7 +126,7 @@ async def handle_validation_error(request: Request, exc: ValidationError):
     )
 
 
-async def handle_infrastructure_exception(request: Request, exc: InfrastructureException):
+def handle_infrastructure_exception(request: Request, exc: InfrastructureException):
     logger.error(
         "Excepcion de infraestructura no controlada",
         context={
@@ -144,7 +144,7 @@ async def handle_infrastructure_exception(request: Request, exc: InfrastructureE
     )
 
 
-async def handle_unhandled_exception(request: Request, exc: Exception):
+def handle_unhandled_exception(request: Request, exc: Exception):
     logger.error(
         "Excepcion no controlada",
         context={
