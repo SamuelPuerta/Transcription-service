@@ -41,98 +41,128 @@ def _iter_table_rows(ws, table) -> Iterable[tuple]:
     for row in ws[table.ref]:
         yield tuple(cell.value for cell in row)
 
+HEADER_ALIASES = {
+    "wav_name": {"wav_name", "wav name", "wav", "wavname", "filename", "file_name"},
+    "csv_name": {"csv_name", "csv name", "csv", "csvname"},
+    "conversation_id": {"conversation_id", "conversation id", "conversationid"},
+    "start_time": {"start_time", "start time"},
+    "end_time": {"end_time", "end time"},
+    "duration": {"duration", "duracion", "duración"},
+    "xlsx_name": {"xlsx_name", "xlsx name"},
+    "consecutivo": {"consecutivo", "consecutive"},
+    "fecha_ocurrencia": {"fecha_ocurrencia", "fecha ocurrencia"},
+    "tiempo_ocurrencia": {"tiempo_ocurrencia", "tiempo ocurrencia"},
+    "activo_herope": {"activo_herope", "activo herope"},
+    "tipo_reporte": {"tipo_reporte", "tipo reporte"},
+    "tipo_movimiento": {"tipo_movimiento", "tipo movimiento"},
+    "denominación_causa e-bitacora": {
+        "denominación_causa e-bitacora",
+        "denominacion_causa e-bitacora",
+        "denominación causa e-bitacora",
+        "denominacion causa e-bitacora",
+    },
+}
+
+PUBLIC_FIELD_MAP = {
+    "Wav_Name": "wav_name",
+    "Csv_Name": "csv_name",
+    "Conversation_ID": "conversation_id",
+    "Start_Time": "start_time",
+    "End_Time": "end_time",
+    "Duration": "duration",
+    "Xlsx_Name": "xlsx_name",
+    "Consecutivo": "consecutivo",
+    "Fecha_Ocurrencia": "fecha_ocurrencia",
+    "Tiempo_Ocurrencia": "tiempo_ocurrencia",
+    "Activo_Herope": "activo_herope",
+    "Tipo_reporte": "tipo_reporte",
+    "Tipo_Movimiento": "tipo_movimiento",
+    "Denominación_causa E-Bitacora": "denominación_causa e-bitacora",
+}
+
+
+def _canonical_header(h_norm: str) -> str:
+    for canon, opts in HEADER_ALIASES.items():
+        if h_norm in opts:
+            return canon
+    return h_norm
+
+
+def _select_best_table_block(ws, tables) -> list[tuple] | None:
+    fallback = None
+    for table in tables:
+        block = list(_iter_table_rows(ws, table))
+        if not block:
+            continue
+        headers = [_norm_header(h) for h in block[0]]
+        if "wav_name" in headers:
+            return block
+        if fallback is None:
+            fallback = block
+    return fallback
+
+
+def _get_candidate_blocks(ws) -> list[list[tuple]]:
+    tables = list(ws.tables.values()) if getattr(ws, "tables", None) else []
+    if tables:
+        best = _select_best_table_block(ws, tables)
+        if best:
+            return [best]
+
+    all_rows = list(ws.iter_rows(values_only=True))
+    if not all_rows:
+        return []
+    return [all_rows]
+
+
+def _build_row(headers_canon: list[str], values: tuple) -> Dict[str, Any]:
+    row: Dict[str, Any] = {}
+    for idx, hcanon in enumerate(headers_canon):
+        if not hcanon:
+            continue
+        value = _clean(values[idx] if idx < len(values) else None)
+        if value is not None:
+            row[hcanon] = value
+    return row
+
+
+def _merge_manifest_row(manifest: Dict[str, Dict[str, Any]], row: Dict[str, Any]) -> None:
+    key = norm_wav_key(row.get("wav_name"))
+    if not key:
+        return
+
+    current = manifest.get(key, {})
+    for k, v in row.items():
+        if v is not None:
+            current[k] = v
+    manifest[key] = current
+
+
+def _to_public_manifest(manifest: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    final: Dict[str, Dict[str, Any]] = {}
+    for key, values in manifest.items():
+        mapped = {public_key: values.get(source_key) for public_key, source_key in PUBLIC_FIELD_MAP.items()}
+        final[key] = {k: v for k, v in mapped.items() if v is not None}
+    return final
+
+
 def parse_xlsx_manifest(xlsx: BytesIO) -> Dict[str, Dict[str, Any]]:
     wb = load_workbook(xlsx, data_only=True)
     ws = wb.active
-    tables = list(ws.tables.values()) if getattr(ws, "tables", None) else []
-    candidate_blocks: list[list[tuple]] = []
-    if tables:
-        best = None
-        for t in tables:
-            block = list(_iter_table_rows(ws, t))
-            if not block:
-                continue
-            headers = [_norm_header(h) for h in block[0]]
-            if "wav_name" in headers:
-                best = block
-                break
-            if best is None:
-                best = block
-        if best:
-            candidate_blocks.append(best)
+
+    candidate_blocks = _get_candidate_blocks(ws)
     if not candidate_blocks:
-        all_rows = list(ws.iter_rows(values_only=True))
-        if not all_rows:
-            return {}
-        candidate_blocks.append(all_rows)
+        return {}
+
     manifest: Dict[str, Dict[str, Any]] = {}
-    header_aliases = {
-        "wav_name": {"wav_name", "wav name", "wav", "wavname", "filename", "file_name"},
-        "csv_name": {"csv_name", "csv name", "csv", "csvname"},
-        "conversation_id": {"conversation_id", "conversation id", "conversationid"},
-        "start_time": {"start_time", "start time"},
-        "end_time": {"end_time", "end time"},
-        "duration": {"duration", "duracion", "duración"},
-        "xlsx_name": {"xlsx_name", "xlsx name"},
-        "consecutivo": {"consecutivo", "consecutive"},
-        "fecha_ocurrencia": {"fecha_ocurrencia", "fecha ocurrencia"},
-        "tiempo_ocurrencia": {"tiempo_ocurrencia", "tiempo ocurrencia"},
-        "activo_herope": {"activo_herope", "activo herope"},
-        "tipo_reporte": {"tipo_reporte", "tipo reporte"},
-        "tipo_movimiento": {"tipo_movimiento", "tipo movimiento"},
-        "denominación_causa e-bitacora": {
-            "denominación_causa e-bitacora",
-            "denominacion_causa e-bitacora",
-            "denominación causa e-bitacora",
-            "denominacion causa e-bitacora",
-        },
-    }
-    def canonical_header(h_norm: str) -> str:
-        for canon, opts in header_aliases.items():
-            if h_norm in opts:
-                return canon
-        return h_norm
     for rows in candidate_blocks:
         if not rows:
             continue
-        raw_headers = list(rows[0])
-        headers_norm = [_norm_header(h) for h in raw_headers]
-        headers_canon = [canonical_header(h) for h in headers_norm]
-        for r in rows[1:]:
-            if not r:
+        headers_canon = [_canonical_header(_norm_header(h)) for h in rows[0]]
+        for values in rows[1:]:
+            if not values:
                 continue
-            row: Dict[str, Any] = {}
-            for i, hcanon in enumerate(headers_canon):
-                if not hcanon:
-                    continue
-                val = _clean(r[i] if i < len(r) else None)
-                if val is not None:
-                    row[hcanon] = val
-            key = norm_wav_key(row.get("wav_name"))
-            if not key:
-                continue
-            cur = manifest.get(key, {})
-            for k, v in row.items():
-                if v is not None:
-                    cur[k] = v
-            manifest[key] = cur
-    final: Dict[str, Dict[str, Any]] = {}
-    for k, v in manifest.items():
-        mapped = {
-            "Wav_Name": v.get("wav_name"),
-            "Csv_Name": v.get("csv_name"),
-            "Conversation_ID": v.get("conversation_id"),
-            "Start_Time": v.get("start_time"),
-            "End_Time": v.get("end_time"),
-            "Duration": v.get("duration"),
-            "Xlsx_Name": v.get("xlsx_name"),
-            "Consecutivo": v.get("consecutivo"),
-            "Fecha_Ocurrencia": v.get("fecha_ocurrencia"),
-            "Tiempo_Ocurrencia": v.get("tiempo_ocurrencia"),
-            "Activo_Herope": v.get("activo_herope"),
-            "Tipo_reporte": v.get("tipo_reporte"),
-            "Tipo_Movimiento": v.get("tipo_movimiento"),
-            "Denominación_causa E-Bitacora": v.get("denominación_causa e-bitacora"),
-        }
-        final[k] = {kk: vv for kk, vv in mapped.items() if vv is not None}
-    return final
+            row = _build_row(headers_canon, values)
+            _merge_manifest_row(manifest, row)
+
+    return _to_public_manifest(manifest)
