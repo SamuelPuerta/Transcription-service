@@ -50,7 +50,7 @@ def _initiative():
     return InitiativeEntity(
         initiative="INIT",
         name="Initiative",
-        storage=Storage(accountName="acc", accountKey="key"),
+        storage=Storage(account_name="acc", account_key="key"),
     )
 
 

@@ -17,11 +17,32 @@ def test_storage_from_dict_maps_optional_fields_to_none_when_empty():
         "connectionStringKeyVaultRef": "",
     }
     s = Storage.from_dict(data)
-    assert s.accountName == "acc"
-    assert s.accountKey == "key"
-    assert s.containerInput is None
-    assert s.containerOutput is None
-    assert s.connectionStringKeyVaultRef is None
+    assert s.account_name == "acc"
+    assert s.account_key == "key"
+    assert s.container_input is None
+    assert s.container_output is None
+    assert s.connection_string_key_vault_ref is None
+
+
+@pytest.mark.unit
+def test_storage_constructor_accepts_legacy_kwargs():
+    s = Storage(accountName="acc", accountKey="key", containerInput="in")
+
+    assert s.account_name == "acc"
+    assert s.account_key == "key"
+    assert s.container_input == "in"
+
+
+@pytest.mark.unit
+def test_storage_constructor_raises_for_unknown_kwargs():
+    with pytest.raises(TypeError, match="Unexpected Storage arguments"):
+        Storage(account_name="acc", account_key="key", unexpected="x")
+
+
+@pytest.mark.unit
+def test_storage_constructor_requires_required_fields():
+    with pytest.raises(TypeError, match="account_name and account_key are required"):
+        Storage()
 
 @pytest.mark.unit
 def test_agent_from_dict():
@@ -65,10 +86,10 @@ def test_initiative_entity_from_dict_full_nested():
     assert e.name == "Initiative"
     assert e.description == "desc"
     assert e.storage is not None
-    assert e.storage.accountName == "acc"
-    assert e.storage.containerInput == "in"
+    assert e.storage.account_name == "acc"
+    assert e.storage.container_input == "in"
     assert e.agents_storage is not None
-    assert e.agents_storage.containerOutput == "aout"
+    assert e.agents_storage.container_output == "aout"
     assert e.agents == [Agent(id="ag1", name="Agent 1"), Agent(id="ag2", name="Agent 2")]
     assert e.configuration is not None
     assert e.configuration.prompt == "p"
@@ -90,3 +111,22 @@ def test_initiative_entity_from_dict_missing_nested_defaults_agents_empty_list()
     assert e.configuration is None
     assert e.description is None
     assert e.agents == []
+
+
+@pytest.mark.unit
+def test_storage_from_dict_supports_snake_case_keys():
+    data = {
+        "account_name": "acc",
+        "account_key": "key",
+        "container_input": "in",
+        "container_output": "out",
+        "connection_string_key_vault_ref": "kv",
+    }
+
+    s = Storage.from_dict(data)
+
+    assert s.account_name == "acc"
+    assert s.account_key == "key"
+    assert s.container_input == "in"
+    assert s.container_output == "out"
+    assert s.connection_string_key_vault_ref == "kv"

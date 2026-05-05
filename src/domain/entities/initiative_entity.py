@@ -48,26 +48,6 @@ class Storage:
         self.container_output = container_output or None
         self.connection_string_key_vault_ref = connection_string_key_vault_ref or None
 
-    @property
-    def accountName(self) -> str:
-        return self.account_name
-
-    @property
-    def accountKey(self) -> str:
-        return self.account_key
-
-    @property
-    def containerInput(self) -> Optional[str]:
-        return self.container_input
-
-    @property
-    def containerOutput(self) -> Optional[str]:
-        return self.container_output
-
-    @property
-    def connectionStringKeyVaultRef(self) -> Optional[str]:
-        return self.connection_string_key_vault_ref
-
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "Storage":
         return Storage(

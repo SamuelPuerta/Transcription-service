@@ -39,8 +39,8 @@ class EnrichFileFromManifest(EnrichFileFromManifestUseCase):
             raise InitiativeNotFound(manifest.initiative_id)
         xlsx_file = await self._blob_storage_adapter.download_file(
             to_blob_file_reference_entity(
-                account_name=initiative_info.storage.accountName,
-                account_key=initiative_info.storage.accountKey,
+                account_name=initiative_info.storage.account_name,
+                account_key=initiative_info.storage.account_key,
                 container_name=batch.storage_container,
                 blob_path=(
                     f"{manifest.initiative_id}/"
