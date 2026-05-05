@@ -45,15 +45,18 @@ class BaseServiceBusConsumer(ABC):
         logger.info("Consumer iniciado", context={"consumer": self.__class__.__name__, "queue": self._config.queue_name})
 
     async def stop(self) -> None:
+        cancelled_error: Optional[asyncio.CancelledError] = None
         self._stop_event.set()
         if self._task:
             self._task.cancel()
             try:
                 await self._task
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError as exc:
+                cancelled_error = exc
         await self._renewer.close()
         logger.info("Consumer detenido", context={"consumer": self.__class__.__name__, "queue": self._config.queue_name})
+        if cancelled_error is not None:
+            raise cancelled_error
 
     async def _run(self) -> None:
         try:

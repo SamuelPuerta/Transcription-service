@@ -165,7 +165,7 @@ def build_infra_lifespan():
             try:
                 await shutdown_di()
             except asyncio.CancelledError:
-                pass
+                raise
             except Exception as e:
                 logger.exception("Error during DI shutdown: %s", e)
             logger.info("Transcription Service stopped")

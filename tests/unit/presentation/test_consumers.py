@@ -301,14 +301,18 @@ async def test_start_does_nothing_when_task_already_running(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_stop_cancels_the_running_task(monkeypatch):
+async def test_stop_cancels_the_running_task_and_propagates_cancelled_error(monkeypatch):
     adapter, _ = _storage_adapter(monkeypatch)
     task = _FakeTask(done=False, await_raises_cancelled=True)
     adapter._task = task
+    renewer_close = AsyncMock()
+    adapter._renewer.close = renewer_close
 
-    await adapter.stop()
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.stop()
 
     assert task._cancelled is True
+    renewer_close.assert_awaited_once()
 
 
 @pytest.mark.unit
