@@ -1,5 +1,6 @@
 import asyncio
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,6 +23,13 @@ from src.infrastructure.exceptions.mongodb_exceptions import (
 
 IndexType = Tuple[List[Tuple[str, int]], Dict[str, Any]]
 BulkWriteParseResult = Tuple[int, Optional[int], List[Dict[str, Any]]]
+
+
+@dataclass
+class InsertManyState:
+    retry_count: int
+    remaining_docs: List[Dict[str, Any]]
+    total_inserted: int = 0
 
 
 class MongoGenericRepo:
@@ -179,6 +187,91 @@ class MongoGenericRepo:
     def _is_retry_limit_reached(self, retry_count: int) -> bool:
         return retry_count >= self._MAX_RETRIES
 
+    @staticmethod
+    def _new_insert_many_state(documents: List[Dict[str, Any]]) -> InsertManyState:
+        return InsertManyState(retry_count=0, remaining_docs=documents)
+
+    async def _attempt_insert_many(self, state: InsertManyState) -> int:
+        result = await self._insert_many_in_collection(state.remaining_docs)
+        inserted_count = len(result.inserted_ids)
+        state.total_inserted += inserted_count
+        if state.retry_count > 0:
+            self._log_info(
+                "Documentos insertados tras reintentos",
+                inserted=inserted_count,
+                retries=state.retry_count,
+            )
+        return state.total_inserted
+
+    async def _handle_insert_many_bulk_write_error(
+        self,
+        exc: BulkWriteError,
+        state: InsertManyState,
+    ) -> Optional[int]:
+        actual_inserted, first_error_index, write_errors = self._parse_bulk_write_error(exc)
+        self._log_partial_bulk_insert_warning(
+            exc=exc,
+            first_error_index=first_error_index,
+        )
+        state.total_inserted += actual_inserted
+
+        if not self._is_rate_limit_error(exc):
+            self._log_error("BulkWriteError no recuperable en insert_many", error=str(exc))
+            self._raise_operation_error(exc, operation="insert_many")
+
+        state.retry_count += 1
+        if self._is_retry_limit_reached(state.retry_count):
+            self._raise_bulk_rate_limit_exhausted(
+                total_inserted=state.total_inserted,
+                remaining_docs=state.remaining_docs,
+                actual_inserted=actual_inserted,
+                first_error_index=first_error_index,
+                exc=exc,
+            )
+            if state.total_inserted > 0:
+                return state.total_inserted
+
+        await self._wait_bulk_retry(state.retry_count, write_errors)
+
+        if actual_inserted == 0:
+            self._log_error("Ningun documento insertado en el reintento", retry=state.retry_count)
+            return None
+
+        if self._should_return_after_bulk_error(actual_inserted, state.remaining_docs):
+            return state.total_inserted
+
+        state.remaining_docs = self._slice_remaining_docs(state.remaining_docs, actual_inserted)
+        return None
+
+    def _log_partial_bulk_insert_warning(
+        self,
+        *,
+        exc: BulkWriteError,
+        first_error_index: Optional[int],
+    ) -> None:
+        inserted_count = exc.details.get("nInserted", 0) if exc.details else 0
+        if first_error_index is None or inserted_count == first_error_index:
+            return
+        self._log_warning(
+            "Insercion parcial antes de error en bulk write",
+            inserted=inserted_count,
+            error_index=first_error_index,
+        )
+
+    async def _handle_insert_many_pymongo_rate_limit(
+        self,
+        exc: PyMongoError,
+        state: InsertManyState,
+    ) -> bool:
+        if not self._is_rate_limit_error(exc):
+            return False
+        if self._is_retry_limit_reached(state.retry_count):
+            return False
+
+        state.retry_count += 1
+        await self._wait_pymongo_retry(state.retry_count)
+        return True
+
     async def create_index(self):
         for keys, options in self._indexes:
             try:
@@ -203,69 +296,21 @@ class MongoGenericRepo:
 
     async def insert_many(self, documents: List[Dict[str, Any]]):
         self._set_timestamps_many(documents)
+        state = self._new_insert_many_state(documents)
 
-        retry_count = 0
-        remaining_docs = documents
-        total_inserted = 0
-
-        while not self._is_retry_limit_reached(retry_count):
+        while not self._is_retry_limit_reached(state.retry_count):
             try:
-                result = await self._insert_many_in_collection(remaining_docs)
-                inserted_count = len(result.inserted_ids)
-                total_inserted += inserted_count
-                if retry_count > 0:
-                    self._log_info(
-                        "Documentos insertados tras reintentos",
-                        inserted=inserted_count,
-                        retries=retry_count,
-                    )
-                return total_inserted
+                return await self._attempt_insert_many(state)
             except BulkWriteError as exc:
-                actual_inserted, first_error_index, write_errors = self._parse_bulk_write_error(exc)
-                inserted_count = exc.details.get("nInserted", 0) if exc.details else 0
-                if first_error_index is not None and inserted_count != first_error_index:
-                    self._log_warning(
-                        "Insercion parcial antes de error en bulk write",
-                        inserted=inserted_count,
-                        error_index=first_error_index,
-                    )
-
-                total_inserted += actual_inserted
-
-                if not self._is_rate_limit_error(exc):
-                    self._log_error("BulkWriteError no recuperable en insert_many", error=str(exc))
-                    self._raise_operation_error(exc, operation="insert_many")
-
-                retry_count += 1
-                if self._is_retry_limit_reached(retry_count):
-                    self._raise_bulk_rate_limit_exhausted(
-                        total_inserted=total_inserted,
-                        remaining_docs=remaining_docs,
-                        actual_inserted=actual_inserted,
-                        first_error_index=first_error_index,
-                        exc=exc,
-                    )
-                    if total_inserted > 0:
-                        return total_inserted
-
-                await self._wait_bulk_retry(retry_count, write_errors)
-
-                if actual_inserted == 0:
-                    self._log_error("Ningun documento insertado en el reintento", retry=retry_count)
-                    continue
-
-                if self._should_return_after_bulk_error(actual_inserted, remaining_docs):
-                    return total_inserted
-
-                remaining_docs = self._slice_remaining_docs(remaining_docs, actual_inserted)
+                result = await self._handle_insert_many_bulk_write_error(exc, state)
+                if result is not None:
+                    return result
                 continue
             except (ConnectionFailure, NetworkTimeout) as exc:
                 self._log_error("Error de conexion en insert_many", error=str(exc))
                 self._raise_connection_error(exc, operation="insert_many")
             except PyMongoError as exc:
-                if self._is_rate_limit_error(exc) and not self._is_retry_limit_reached(retry_count):
-                    retry_count += 1
-                    await self._wait_pymongo_retry(retry_count)
+                if await self._handle_insert_many_pymongo_rate_limit(exc, state):
                     continue
 
                 self._log_error("PyMongoError en insert_many", error=str(exc))

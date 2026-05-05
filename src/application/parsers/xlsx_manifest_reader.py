@@ -4,6 +4,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from openpyxl import load_workbook
 
 NBSP = "\u00a0"
+CAUSE_E_BITACORA = "denominación_causa e-bitacora"
+CAUSE_E_BITACORA_PUBLIC = "Denominación_causa E-Bitacora"
 
 
 def _norm_text(s: str) -> str:
@@ -61,8 +63,8 @@ HEADER_ALIASES = {
     "activo_herope": {"activo_herope", "activo herope"},
     "tipo_reporte": {"tipo_reporte", "tipo reporte"},
     "tipo_movimiento": {"tipo_movimiento", "tipo movimiento"},
-    "denominación_causa e-bitacora": {
-        "denominación_causa e-bitacora",
+    CAUSE_E_BITACORA: {
+        CAUSE_E_BITACORA,
         "denominacion_causa e-bitacora",
         "denominación causa e-bitacora",
         "denominacion causa e-bitacora",
@@ -83,7 +85,7 @@ PUBLIC_FIELD_MAP = {
     "Activo_Herope": "activo_herope",
     "Tipo_reporte": "tipo_reporte",
     "Tipo_Movimiento": "tipo_movimiento",
-    "Denominación_causa E-Bitacora": "denominación_causa e-bitacora",
+    CAUSE_E_BITACORA_PUBLIC: CAUSE_E_BITACORA,
 }
 
 _CANONICAL_HEADER_BY_ALIAS = {

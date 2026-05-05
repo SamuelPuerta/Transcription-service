@@ -9,22 +9,77 @@ def _parse_datetime(value: Any) -> datetime:
         return datetime.fromisoformat(value)
     return datetime.now(timezone.utc)
 
-@dataclass
+@dataclass(init=False)
 class Storage:
-    accountName: str
-    accountKey: str
-    containerInput: Optional[str] = None
-    containerOutput: Optional[str] = None
-    connectionStringKeyVaultRef: Optional[str] = None
+    account_name: str
+    account_key: str
+    container_input: Optional[str] = None
+    container_output: Optional[str] = None
+    connection_string_key_vault_ref: Optional[str] = None
+
+    def __init__(
+        self,
+        account_name: Optional[str] = None,
+        account_key: Optional[str] = None,
+        container_input: Optional[str] = None,
+        container_output: Optional[str] = None,
+        connection_string_key_vault_ref: Optional[str] = None,
+        **legacy: Any,
+    ) -> None:
+        if account_name is None:
+            account_name = legacy.pop("accountName", None)
+        if account_key is None:
+            account_key = legacy.pop("accountKey", None)
+        if container_input is None:
+            container_input = legacy.pop("containerInput", None)
+        if container_output is None:
+            container_output = legacy.pop("containerOutput", None)
+        if connection_string_key_vault_ref is None:
+            connection_string_key_vault_ref = legacy.pop("connectionStringKeyVaultRef", None)
+        if legacy:
+            unknown = ", ".join(sorted(legacy.keys()))
+            raise TypeError(f"Unexpected Storage arguments: {unknown}")
+        if account_name is None or account_key is None:
+            raise TypeError("account_name and account_key are required")
+
+        self.account_name = account_name
+        self.account_key = account_key
+        self.container_input = container_input or None
+        self.container_output = container_output or None
+        self.connection_string_key_vault_ref = connection_string_key_vault_ref or None
+
+    @property
+    def accountName(self) -> str:
+        return self.account_name
+
+    @property
+    def accountKey(self) -> str:
+        return self.account_key
+
+    @property
+    def containerInput(self) -> Optional[str]:
+        return self.container_input
+
+    @property
+    def containerOutput(self) -> Optional[str]:
+        return self.container_output
+
+    @property
+    def connectionStringKeyVaultRef(self) -> Optional[str]:
+        return self.connection_string_key_vault_ref
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "Storage":
         return Storage(
-            accountName=data["accountName"],            
-            accountKey=data["accountKey"],               
-            containerInput=data.get("containerInput") or None,
-            containerOutput=data.get("containerOutput") or None,
-            connectionStringKeyVaultRef=data.get("connectionStringKeyVaultRef") or None,
+            account_name=data.get("account_name") or data["accountName"],
+            account_key=data.get("account_key") or data["accountKey"],
+            container_input=(data.get("container_input") if "container_input" in data else data.get("containerInput")) or None,
+            container_output=(data.get("container_output") if "container_output" in data else data.get("containerOutput")) or None,
+            connection_string_key_vault_ref=(
+                data.get("connection_string_key_vault_ref")
+                if "connection_string_key_vault_ref" in data
+                else data.get("connectionStringKeyVaultRef")
+            ) or None,
         )
 
 @dataclass

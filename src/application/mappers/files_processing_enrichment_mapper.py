@@ -120,36 +120,61 @@ def _parse_excel_time_str(value: Any) -> str | None:
         return value.strftime("%H:%M:%S")
     if isinstance(value, time):
         return f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None
-        normalized = (
-            stripped.lower()
-            .replace("\u00a0", " ")
-            .replace("a. m.", "am")
-            .replace("p. m.", "pm")
-            .replace("a.m.", "am")
-            .replace("p.m.", "pm")
-            .replace(".", "")
-            .strip()
-        )
-        try:
-            if normalized.endswith(("am", "pm")):
-                compacted = normalized.replace(" ", "")
-                return datetime.strptime(compacted, "%I:%M:%S%p").strftime("%H:%M:%S")
-        except ValueError:
-            pass
-        try:
-            return datetime.strptime(normalized, "%H:%M:%S").strftime("%H:%M:%S")
-        except ValueError:
-            pass
-        try:
-            parsed = _parse_excel_datetime(stripped)
-            return parsed.strftime("%H:%M:%S") if parsed else None
-        except ValueError:
-            return None
-    return None
+    if not isinstance(value, str):
+        return None
+
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    normalized = _normalize_time_text(stripped)
+    parsed_12h = _parse_12h_time(normalized)
+    if parsed_12h:
+        return parsed_12h
+
+    parsed_24h = _parse_24h_time(normalized)
+    if parsed_24h:
+        return parsed_24h
+
+    return _parse_time_from_datetime_string(stripped)
+
+
+def _normalize_time_text(value: str) -> str:
+    return (
+        value.lower()
+        .replace("\u00a0", " ")
+        .replace("a. m.", "am")
+        .replace("p. m.", "pm")
+        .replace("a.m.", "am")
+        .replace("p.m.", "pm")
+        .replace(".", "")
+        .strip()
+    )
+
+
+def _parse_12h_time(value: str) -> str | None:
+    if not value.endswith(("am", "pm")):
+        return None
+    compacted = value.replace(" ", "")
+    try:
+        return datetime.strptime(compacted, "%I:%M:%S%p").strftime("%H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _parse_24h_time(value: str) -> str | None:
+    try:
+        return datetime.strptime(value, "%H:%M:%S").strftime("%H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _parse_time_from_datetime_string(value: str) -> str | None:
+    try:
+        parsed = _parse_excel_datetime(value)
+    except ValueError:
+        return None
+    return parsed.strftime("%H:%M:%S") if parsed else None
 
 def _parse_excel_duration_mmss(value: Any) -> str | None:
     if value is None:

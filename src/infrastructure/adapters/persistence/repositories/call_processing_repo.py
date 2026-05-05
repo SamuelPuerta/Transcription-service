@@ -9,6 +9,7 @@ from src.domain.value_objects.call_processing_status import CallProcessingStatus
 
 class CallProcessingRepo(MongoGenericRepo, CallProcessing):
     _collection_name = "call_processing"
+    _TOTAL_FILES_EXPR = "$total_files"
     _to_doc = staticmethod(to_doc)
     _from_doc = staticmethod(from_doc)
     _indexes = [
@@ -92,7 +93,7 @@ class CallProcessingRepo(MongoGenericRepo, CallProcessing):
                 "batch_id": batch_id,
                 "total_files": {"$gt": 0},
                 "status": {"$in": [CallProcessingStatus.PENDING, CallProcessingStatus.PROCESSING]},
-                "$expr": {"$eq": ["$failed_files", "$total_files"]},
+                "$expr": {"$eq": ["$failed_files", self._TOTAL_FILES_EXPR]},
             },
             {"$set": {"status": CallProcessingStatus.FAILED, "completed_at": now, "updated_at": now}},
         )
@@ -101,7 +102,12 @@ class CallProcessingRepo(MongoGenericRepo, CallProcessing):
                 "batch_id": batch_id,
                 "total_files": {"$gt": 0},
                 "status": {"$in": [CallProcessingStatus.PENDING, CallProcessingStatus.PROCESSING]},
-                "$expr": {"$and": [{"$eq": ["$processed_files", "$total_files"]}, {"$lt": ["$failed_files", "$total_files"]}]},
+                "$expr": {
+                    "$and": [
+                        {"$eq": ["$processed_files", self._TOTAL_FILES_EXPR]},
+                        {"$lt": ["$failed_files", self._TOTAL_FILES_EXPR]},
+                    ]
+                },
             },
             {"$set": {"status": CallProcessingStatus.COMPLETED, "completed_at": now, "updated_at": now}},
         )
